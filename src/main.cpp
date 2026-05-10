@@ -488,6 +488,9 @@ int main(int argc, char* argv[]) {
     static bool showVisualizer = true;
     static bool show_about_window = false;
     bool deviceOpened = false;
+    std::deque<float> globalDeadzonePollHistory;
+    bool previousAutoMinDeadzone = false;
+    constexpr size_t globalDeadzoneAverageWindow = 10;
 
     std::vector<std::deque<float>> axisHistory;
 
@@ -739,6 +742,7 @@ int main(int argc, char* argv[]) {
                             deviceOpened = joyHandler.open(selectedDevice);
 
                             axisHistory.clear();
+                            globalDeadzonePollHistory.clear();
 
                             // --- CRASH FIX ---
                             // Immediately resize the history buffer to match the new device's axis count.
@@ -766,6 +770,11 @@ int main(int argc, char* argv[]) {
                 static float deadzoneFloat = 0.0f; // Range: 0.0 to 0.25 (0% to 25%)
                 static bool autoMinDeadzone = false; // Zero Out DZ mode: set per-axis DZ from resting values
 
+                if (autoMinDeadzone != previousAutoMinDeadzone) {
+                    globalDeadzonePollHistory.clear();
+                    previousAutoMinDeadzone = autoMinDeadzone;
+                }
+
                 // When "Zero Out DZ" is active, every frame set each non-trigger axis's
                 // deadzone independently to its own current resting absolute value.
                 if (autoMinDeadzone && joyHandler.isOpen()) {
@@ -782,8 +791,21 @@ int main(int argc, char* argv[]) {
                             if (absVal > maxRaw) maxRaw = absVal;
                         }
                     }
-                    // Keep global slider in sync with the largest per-axis value
-                    deadzoneFloat = std::min(maxRaw / 32767.0f, 0.25f);
+                    // Keep global slider in sync using an average over recent polls
+                    float currentGlobalDz = std::min(maxRaw / 32767.0f, 0.25f);
+                    globalDeadzonePollHistory.push_back(currentGlobalDz);
+                    while (globalDeadzonePollHistory.size() > globalDeadzoneAverageWindow) {
+                        globalDeadzonePollHistory.pop_front();
+                    }
+
+                    float averagedGlobalDz = 0.0f;
+                    for (float sample : globalDeadzonePollHistory) {
+                        averagedGlobalDz += sample;
+                    }
+                    if (!globalDeadzonePollHistory.empty()) {
+                        averagedGlobalDz /= static_cast<float>(globalDeadzonePollHistory.size());
+                    }
+                    deadzoneFloat = averagedGlobalDz;
                 }
 
                 ImGui::SetNextItemWidth(120);
