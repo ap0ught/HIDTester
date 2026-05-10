@@ -798,14 +798,14 @@ int main(int argc, char* argv[]) {
                         globalDeadzonePollHistory.pop_front();
                     }
 
-                    float averagedGlobalDz = 0.0f;
-                    for (float sample : globalDeadzonePollHistory) {
-                        averagedGlobalDz += sample;
-                    }
                     if (!globalDeadzonePollHistory.empty()) {
+                        float averagedGlobalDz = 0.0f;
+                        for (float sample : globalDeadzonePollHistory) {
+                            averagedGlobalDz += sample;
+                        }
                         averagedGlobalDz /= static_cast<float>(globalDeadzonePollHistory.size());
+                        deadzoneFloat = averagedGlobalDz;
                     }
-                    deadzoneFloat = averagedGlobalDz;
                 }
 
                 ImGui::SetNextItemWidth(120);
