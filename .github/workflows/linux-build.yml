@@ -18,6 +18,12 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
+    - name: Compute Safe Ref Name
+      id: ref
+      run: |
+        SAFE_REF="$(echo "${GITHUB_REF_NAME}" | sed 's#[\\/:*?"<>|]#-#g')"
+        echo "safe_ref=$SAFE_REF" >> "$GITHUB_OUTPUT"
+
     - name: Download ImGui
       run: |
         mkdir -p thirdparty
@@ -36,7 +42,7 @@ jobs:
 
     - name: Package Release
       run: |
-        VERSION="${{ github.ref_name }}"
+        VERSION="${{ steps.ref.outputs.safe_ref }}"
         DIR_NAME="HIDTester-$VERSION-Linux"
         
         mkdir -p "$DIR_NAME"
@@ -50,8 +56,8 @@ jobs:
     - name: Upload Artifact to Actions
       uses: actions/upload-artifact@v4
       with:
-        name: HIDTester-${{ github.ref_name }}-Linux
-        path: HIDTester-${{ github.ref_name }}-Linux/
+        name: HIDTester-${{ steps.ref.outputs.safe_ref }}-Linux
+        path: HIDTester-${{ steps.ref.outputs.safe_ref }}-Linux/
 
     - name: Upload to GitHub Release
       if: github.event_name == 'release'

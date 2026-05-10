@@ -16,6 +16,13 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
+    - name: Compute Safe Ref Name
+      id: ref
+      shell: bash
+      run: |
+        SAFE_REF="$(echo "${GITHUB_REF_NAME}" | sed 's#[\\/:*?"<>|]#-#g')"
+        echo "safe_ref=$SAFE_REF" >> "$GITHUB_OUTPUT"
+
     - name: Download ImGui
       run: |
         mkdir thirdparty
@@ -48,7 +55,7 @@ jobs:
       # Using bash shell here to keep the zip/cp syntax consistent with your Linux/macOS workflows
       shell: bash 
       run: |
-        VERSION="${{ github.ref_name }}"
+        VERSION="${{ steps.ref.outputs.safe_ref }}"
         DIR_NAME="HIDTester-$VERSION-Windows"
         mkdir -p "$DIR_NAME"
         
@@ -64,8 +71,8 @@ jobs:
     - name: Upload Artifact to Actions
       uses: actions/upload-artifact@v4
       with:
-        name: HIDTester-${{ github.ref_name }}-Windows
-        path: HIDTester-${{ github.ref_name }}-Windows/
+        name: HIDTester-${{ steps.ref.outputs.safe_ref }}-Windows
+        path: HIDTester-${{ steps.ref.outputs.safe_ref }}-Windows/
 
     - name: Upload to GitHub Release
       if: github.event_name == 'release'
