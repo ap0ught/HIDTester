@@ -1,5 +1,5 @@
 #pragma once
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <vector>
 #include <string>
 #include <cmath>     // Required for std::abs
@@ -62,16 +62,26 @@ public:
         return false;
     }
 
-    bool open(int deviceIndex) {
+    bool open(SDL_JoystickID deviceId) {
         close();
-        joystick = SDL_JoystickOpen(deviceIndex);
+        joystick = SDL_OpenJoystick(deviceId);
         
         if (joystick) {
-            int numAxes = SDL_JoystickNumAxes(joystick);
+            int numAxes    = SDL_GetNumJoystickAxes(joystick);
+            int numButtons = SDL_GetNumJoystickButtons(joystick);
+            int numHats    = SDL_GetNumJoystickHats(joystick);
+
+            // SDL3 returns -1 on failure; treat that as an open() failure.
+            if (numAxes < 0 || numButtons < 0 || numHats < 0) {
+                SDL_CloseJoystick(joystick);
+                joystick = nullptr;
+                return false;
+            }
+
             state.axes.assign(numAxes, 0.0f);
             state.sdlAxes.assign(numAxes, 0);
-            state.buttons.assign(SDL_JoystickNumButtons(joystick), false);
-            state.hats.assign(SDL_JoystickNumHats(joystick), SDL_HAT_CENTERED);
+            state.buttons.assign(static_cast<size_t>(numButtons), false);
+            state.hats.assign(static_cast<size_t>(numHats), SDL_HAT_CENTERED);
 
             // Initialize all axes as default bidirectional sticks
             state.axisIsTrigger.assign(numAxes, false);
@@ -85,13 +95,13 @@ public:
             // --- Auto-Detection Heuristic for Triggers ---
             // Force an immediate update to grab the real physical state 
             // the moment the device is initialized.
-            SDL_JoystickUpdate(); 
+            SDL_UpdateJoysticks();
             
             for (int i = 0; i < numAxes; i++) {
                 int16_t initialVal = 0;
                 
                 // Try to get the initial state if the driver provides it immediately
-                if (SDL_JoystickGetAxisInitialState(joystick, i, &initialVal)) {
+                if (SDL_GetJoystickAxisInitialState(joystick, i, &initialVal)) {
                     if (initialVal != 0) {
 #ifndef __APPLE__
                         // Windows & Linux: Triggers rest at absolute minimum (-32768).
@@ -115,7 +125,7 @@ public:
 
     void close() {
         if (joystick) {
-            SDL_JoystickClose(joystick);
+            SDL_CloseJoystick(joystick);
             joystick = nullptr;
         }
     }
@@ -126,7 +136,7 @@ public:
         // Process analog axes
         for (int i = 0; i < (int)state.axes.size(); i++) {
             // Read the raw API value
-            int16_t rawSdlValue = SDL_JoystickGetAxis(joystick, i);
+            int16_t rawSdlValue = SDL_GetJoystickAxis(joystick, i);
 
             // --- EVENT-DRIVEN AUTO-DETECT ---
             // If the OS/Driver delayed the initial report, we wait until the axis shows movement.
@@ -199,17 +209,24 @@ public:
         
         // Process digital buttons
         for (int i = 0; i < (int)state.buttons.size(); i++) {
-            state.buttons[i] = SDL_JoystickGetButton(joystick, i) != 0;
+            state.buttons[i] = SDL_GetJoystickButton(joystick, i);
         }
         
         // Process POV Hats (D-Pads)
         for (int i = 0; i < (int)state.hats.size(); i++) {
-            state.hats[i] = SDL_JoystickGetHat(joystick, i);
+            state.hats[i] = SDL_GetJoystickHat(joystick, i);
         }
     }
 
     const JoystickState& getState() const { return state; }
-    std::string getName() const { return joystick ? SDL_JoystickName(joystick) : "None"; }
+    std::string getName() const {
+        if (!joystick) {
+            return "None";
+        }
+
+        const char* name = SDL_GetJoystickName(joystick);
+        return name ? name : "Unknown Device";
+    }
     bool isOpen() const { return joystick != nullptr; }
 
 private:

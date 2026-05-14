@@ -9,12 +9,13 @@
 #include <sys/types.h>
 #endif
 
-#include <SDL.h>
-#include <SDL_opengl.h>
-#include <SDL_syswm.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
+#include <SDL3/SDL_opengl.h>
 #include "imgui.h"
-#include "imgui_impl_sdl2.h"
+#include "imgui_impl_sdl3.h"
 #include "imgui_impl_opengl3.h"
+#include "HatUtils.h"
 #include "JoystickHandler.h"
 #include <vector>
 #include <string>
@@ -25,41 +26,6 @@
 #include <chrono>  // Required for Macro Event Log timing
 #include <map>     // Required for tracking button states
 #include <sstream> // Required for building clipboard text
-
-/**
- * Helper to convert SDL_HAT values to human-readable strings (8-way support)
- */
-const char* GetHatDirString(uint8_t value) {
-    switch (value) {
-        case SDL_HAT_CENTERED:  return "Centered";
-        case SDL_HAT_UP:        return "Up";
-        case SDL_HAT_RIGHT:     return "Right";
-        case SDL_HAT_DOWN:      return "Down";
-        case SDL_HAT_LEFT:      return "Left";
-        case SDL_HAT_RIGHTUP:   return "Up-Right";
-        case SDL_HAT_RIGHTDOWN: return "Down-Right";
-        case SDL_HAT_LEFTUP:    return "Up-Left";
-        case SDL_HAT_LEFTDOWN:  return "Down-Left";
-        default:                return "Unknown";
-    }
-}
-/**
- * Converts SDL_HAT bitmasks into standard game engine degrees (0-360).
- * 0 degrees is strictly UP (North), rotating clockwise.
- */
-int GetHatDegree(uint8_t value) {
-    switch (value) {
-        case SDL_HAT_UP:        return 0;
-        case SDL_HAT_RIGHTUP:   return 45;
-        case SDL_HAT_RIGHT:     return 90;
-        case SDL_HAT_RIGHTDOWN: return 135;
-        case SDL_HAT_DOWN:      return 180;
-        case SDL_HAT_LEFTDOWN:  return 225;
-        case SDL_HAT_LEFT:      return 270;
-        case SDL_HAT_LEFTUP:    return 315;
-        default:                return -1; // Centered or invalid
-    }
-}
 
 // --- Data structure for the unified macro event log (Joysticks) ---
 struct InputEvent {
@@ -383,19 +349,19 @@ struct KeyboardEvent {
 
 // --- Mouse Tracking Data ---
 struct MouseState {
-    int x, y;
-    int deltaX, deltaY;
+    float x, y;
+    float deltaX, deltaY;
     int wheelDelta;
     bool buttons[5]; // Left, Middle, Right, X1, X2
     std::deque<ImVec2> movementTrail; // For drawing the 2D Scatter plot
 
     // For Polling Rate Calculation
-    uint32_t lastEventTime = 0;
+    Uint64 lastEventTime = 0;
     float currentHz = 0.0f;
 };
 
 int main(int argc, char* argv[]) {
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER) != 0) return -1;
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMEPAD)) return -1;
 
     const char* glsl_version = "#version 130";
 
@@ -436,18 +402,27 @@ int main(int argc, char* argv[]) {
     #endif
 
     SDL_Window* window = SDL_CreateWindow("HID Tester - A Free Joystick Testing App",
-                                          SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                           1280, 900, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    if (!window) {
+        SDL_Quit();
+        return -1;
+    }
+
+    SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
     SDL_GLContext gl_context = SDL_GL_CreateContext(window);
+    if (!gl_context) {
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return -1;
+    }
 
     // --- ICON LOADING ---
     #ifdef _WIN32
-    SDL_SysWMinfo wmInfo;
-    SDL_VERSION(&wmInfo.version);
-    if (SDL_GetWindowWMInfo(window, &wmInfo)) {
+    HWND hwnd = static_cast<HWND>(SDL_GetPointerProperty(
+        SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr));
+    if (hwnd) {
         HICON hIcon = LoadIcon(GetModuleHandle(NULL), "IDI_ICON1");
         if (hIcon) {
-            HWND hwnd = wmInfo.info.win.window;
             SendMessage(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
             SendMessage(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
         }
@@ -468,7 +443,7 @@ int main(int argc, char* argv[]) {
     style.Colors[ImGuiCol_WindowBg] = ImVec4(0.09f, 0.09f, 0.09f, 1.00f);
     style.Colors[ImGuiCol_Header]   = ImVec4(0.20f, 0.25f, 0.30f, 1.00f);
 
-    ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
+    ImGui_ImplSDL3_InitForOpenGL(window, gl_context);
     ImGui_ImplOpenGL3_Init(glsl_version);
 
     // --- DISABLE VSYNC FOR HARDWARE POLLING ---
@@ -481,13 +456,17 @@ int main(int argc, char* argv[]) {
     JoystickHandler joyHandler;
 
     // --- Force explicit selection ---
-    // Start with -1 to indicate no device is currently selected.
-    static int selectedDevice = -1;
+    // Start with 0 to indicate no device is currently selected.
+    static SDL_JoystickID selectedDevice = 0;
 
     static int axisX_idx = 0, axisY_idx = 1, axisX2_idx = 2, axisY2_idx = 3;
     static bool showVisualizer = true;
     static bool show_about_window = false;
     bool deviceOpened = false;
+
+    // Joystick list cache — rebuilt only on SDL_EVENT_JOYSTICK_ADDED/REMOVED events.
+    std::vector<SDL_JoystickID> cachedJoystickIds;
+    bool joystickListDirty = true; // true forces an initial population
 
     std::vector<std::deque<float>> axisHistory;
 
@@ -520,16 +499,21 @@ int main(int argc, char* argv[]) {
     while (!done) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
-            ImGui_ImplSDL2_ProcessEvent(&event);
-            if (event.type == SDL_QUIT) done = true;
+            ImGui_ImplSDL3_ProcessEvent(&event);
+            if (event.type == SDL_EVENT_QUIT) done = true;
+
+            // Mark the cached joystick list stale on device hotplug events.
+            if (event.type == SDL_EVENT_JOYSTICK_ADDED || event.type == SDL_EVENT_JOYSTICK_REMOVED) {
+                joystickListDirty = true;
+            }
 
             // Keyboard Event Tracking
-            if (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP) {
+            if (event.type == SDL_EVENT_KEY_DOWN || event.type == SDL_EVENT_KEY_UP) {
                 // Ignore key repeats (holding down a key) for clean analysis
-                if (event.key.repeat == 0) {
-                    bool isDown = (event.type == SDL_KEYDOWN);
-                    SDL_Scancode scancode = event.key.keysym.scancode;
-                    std::string keyName = SDL_GetKeyName(event.key.keysym.sym);
+                if (!event.key.repeat) {
+                    bool isDown = (event.type == SDL_EVENT_KEY_DOWN);
+                    SDL_Scancode scancode = event.key.scancode;
+                    std::string keyName = SDL_GetKeyName(event.key.key);
 
                     double duration = 0.0;
 
@@ -561,15 +545,15 @@ int main(int argc, char* argv[]) {
             }
 
             // Mouse Event Tracking
-            if (event.type == SDL_MOUSEMOTION) {
+            if (event.type == SDL_EVENT_MOUSE_MOTION) {
                 mouseState.x = event.motion.x;
                 mouseState.y = event.motion.y;
                 mouseState.deltaX = event.motion.xrel;
                 mouseState.deltaY = event.motion.yrel;
 
                 // Calculate Polling Rate (Hz)
-                uint32_t currentTime = SDL_GetTicks();
-                uint32_t timeDiff = currentTime - mouseState.lastEventTime;
+                Uint64 currentTime = SDL_GetTicks();
+                Uint64 timeDiff = currentTime - mouseState.lastEventTime;
                 if (timeDiff > 0) {
                     mouseState.currentHz = 1000.0f / (float)timeDiff;
                 }
@@ -579,21 +563,33 @@ int main(int argc, char* argv[]) {
                 mouseState.movementTrail.push_back(ImVec2((float)mouseState.x, (float)mouseState.y));
                 if (mouseState.movementTrail.size() > 200) mouseState.movementTrail.pop_front();
             }
-            if (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) {
-                bool isDown = (event.type == SDL_MOUSEBUTTONDOWN);
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN || event.type == SDL_EVENT_MOUSE_BUTTON_UP) {
+                bool isDown = (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN);
                 if (event.button.button == SDL_BUTTON_LEFT)   mouseState.buttons[0] = isDown;
                 if (event.button.button == SDL_BUTTON_MIDDLE) mouseState.buttons[1] = isDown;
                 if (event.button.button == SDL_BUTTON_RIGHT)  mouseState.buttons[2] = isDown;
                 if (event.button.button == SDL_BUTTON_X1)     mouseState.buttons[3] = isDown;
                 if (event.button.button == SDL_BUTTON_X2)     mouseState.buttons[4] = isDown;
             }
-            if (event.type == SDL_MOUSEWHEEL) {
-                mouseState.wheelDelta = event.wheel.y; // Positive is up, negative is down
+            if (event.type == SDL_EVENT_MOUSE_WHEEL) {
+                mouseState.wheelDelta = event.wheel.integer_y; // Positive is up, negative is down
             }
         }
 
+        // Refresh the cached joystick list whenever a hotplug event was received.
+        if (joystickListDirty) {
+            int nJoysticksFresh = 0;
+            SDL_JoystickID* freshIds = SDL_GetJoysticks(&nJoysticksFresh);
+            cachedJoystickIds.clear();
+            if (freshIds && nJoysticksFresh > 0) {
+                cachedJoystickIds.assign(freshIds, freshIds + nJoysticksFresh);
+            }
+            SDL_free(freshIds);
+            joystickListDirty = false;
+        }
+
         ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplSDL2_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
         // --- Data Update Layer (Runs before UI rendering for continuous tracking) ---
@@ -672,8 +668,8 @@ int main(int argc, char* argv[]) {
             // --- FIXED TIMESTEP FOR AXIS CURVES ---
             // Update the visual history graphs approximately 60 times per second (every ~16 ms),
             // completely independent of the application's uncapped frame rate.
-            static Uint32 lastCurveUpdate = SDL_GetTicks();
-            Uint32 currentTime = SDL_GetTicks();
+            static Uint64 lastCurveUpdate = SDL_GetTicks();
+            Uint64 currentTime = SDL_GetTicks();
 
             if (currentTime - lastCurveUpdate >= 16) {
                 // Process Axis History
@@ -717,25 +713,32 @@ int main(int argc, char* argv[]) {
             if (currentMode == AppMode::Joystick) {
                 ImGui::Text("Device:");
                 ImGui::SetNextItemWidth(300);
-                int nJoysticks = SDL_NumJoysticks();
+                int nJoysticks = static_cast<int>(cachedJoystickIds.size());
+                const SDL_JoystickID* joystickIds = cachedJoystickIds.data();
 
                 // --- Dynamic Dropdown Label ---
                 std::string currentNameStr = "Select a device...";
                 if (nJoysticks == 0) {
                     currentNameStr = "No Device Detected";
-                } else if (selectedDevice >= 0 && selectedDevice < nJoysticks) {
-                    // Put ID in front of names
-                    currentNameStr = "[" + std::to_string(selectedDevice) + "] " + SDL_JoystickNameForIndex(selectedDevice);
+                } else {
+                    for (int i = 0; i < nJoysticks; i++) {
+                        if (selectedDevice == joystickIds[i]) {
+                            const char* currentName = SDL_GetJoystickNameForID(joystickIds[i]);
+                            currentNameStr = "[" + std::to_string(i) + "] " + (currentName ? currentName : "Unknown Device");
+                            break;
+                        }
+                    }
                 }
 
                 if (ImGui::BeginCombo("##DeviceSelector", currentNameStr.c_str())) {
                     for (int i = 0; i < nJoysticks; i++) {
-                        bool isSelected = (selectedDevice == i);
-                        std::string deviceName = SDL_JoystickNameForIndex(i);
+                        bool isSelected = (selectedDevice == joystickIds[i]);
+                        const char* joystickName = SDL_GetJoystickNameForID(joystickIds[i]);
+                        std::string deviceName = joystickName ? joystickName : "Unknown Device";
                         std::string visibleLabel = "[" + std::to_string(i) + "] " + deviceName;
 
                         if (ImGui::Selectable(visibleLabel.c_str(), isSelected)) {
-                            selectedDevice = i;
+                            selectedDevice = joystickIds[i];
                             deviceOpened = joyHandler.open(selectedDevice);
 
                             axisHistory.clear();
@@ -758,6 +761,7 @@ int main(int argc, char* argv[]) {
                     }
                     ImGui::EndCombo();
                 }
+
                 ImGui::SameLine(0.0f, 30.0f);
                 ImGui::Checkbox("Show Stick Monitors", &showVisualizer);
 
@@ -839,7 +843,7 @@ int main(int argc, char* argv[]) {
                         for (int i = 0; i < static_cast<int>(s.sdlAxes.size()); i++) {
                             float minDZ = 0.0f;
                             if (!s.axisIsTrigger[i]) {
-                                minDZ = std::min(std::abs(static_cast<int>(s.sdlAxes[i])) / 32767.0f, 1.0f);
+                                minDZ = std::min(std::abs(static_cast<int>(s.sdlAxes[i])) / 32767.0f, 0.25f);
                             }
                             snprintf(lineBuf, LINE_BUFFER_SIZE,
                                      "  %-5d %-9s %6.2f%%   %.4f      %6d\n",
@@ -1291,8 +1295,8 @@ int main(int argc, char* argv[]) {
 
                     // Column 3: Raw Movement Deltas
                     ImGui::TextColored(ImVec4(0.0f, 0.7f, 1.0f, 1.0f), "Raw Movement Data");
-                    ImGui::Text("Absolute: X: %d, Y: %d", mouseState.x, mouseState.y);
-                    ImGui::Text("Delta:    X: %d, Y: %d", mouseState.deltaX, mouseState.deltaY);
+                    ImGui::Text("Absolute: X: %.1f, Y: %.1f", mouseState.x, mouseState.y);
+                    ImGui::Text("Delta:    X: %.1f, Y: %.1f", mouseState.deltaX, mouseState.deltaY);
 
                     ImGui::Columns(1);
                     ImGui::EndChild();
@@ -1352,7 +1356,8 @@ int main(int argc, char* argv[]) {
         ImGui::End();
 
         ImGui::Render();
-        int dw, dh; SDL_GL_GetDrawableSize(window, &dw, &dh);
+        int dw = 0, dh = 0;
+        SDL_GetWindowSizeInPixels(window, &dw, &dh);
         glViewport(0, 0, dw, dh);
         glClearColor(0.06f, 0.06f, 0.06f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -1361,9 +1366,9 @@ int main(int argc, char* argv[]) {
     }
 
     ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplSDL2_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
-    SDL_GL_DeleteContext(gl_context);
+    SDL_GL_DestroyContext(gl_context);
     SDL_DestroyWindow(window);
     SDL_Quit();
 

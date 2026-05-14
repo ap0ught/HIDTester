@@ -21,28 +21,22 @@ jobs:
         mkdir thirdparty
         git clone --depth 1 https://github.com/ocornut/imgui.git thirdparty/imgui
 
-    - name: Download and Extract SDL2
-      # Dynamically fetches the latest SDL2 release from GitHub so the build
-      # always uses the most up-to-date patched version.
+    - name: Download and Extract SDL3
+      # Download official SDL3 VC development libraries and extract to thirdparty/SDL3
       run: |
-        $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/libsdl-org/SDL/releases?per_page=100"
-        $sdl2Release = $releases | Where-Object { $_.tag_name -like 'release-2.*' -and -not $_.draft -and -not $_.prerelease } | Select-Object -First 1
-        if (-not $sdl2Release) {
-          Write-Error "No SDL2 release found matching 'release-2.*'. Aborting."
-          exit 1
-        }
-        $sdl2Version = $sdl2Release.tag_name -replace 'release-', ''
-        $sdl2Url = "https://github.com/libsdl-org/SDL/releases/download/release-$sdl2Version/SDL2-devel-$sdl2Version-VC.zip"
-        Write-Host "Downloading SDL2 version $sdl2Version from $sdl2Url"
-        Invoke-WebRequest -Uri $sdl2Url -OutFile "SDL2.zip"
-        Expand-Archive -Path "SDL2.zip" -DestinationPath "thirdparty"
-        Rename-Item -Path "thirdparty\SDL2-$sdl2Version" -NewName "SDL2"
+        $SDLVersion = "3.4.8"
+        Invoke-WebRequest -Uri "https://github.com/libsdl-org/SDL/releases/download/release-$SDLVersion/SDL3-devel-$SDLVersion-VC.zip" -OutFile "SDL3.zip"
+        Expand-Archive -Path "SDL3.zip" -DestinationPath "thirdparty"
+        Rename-Item -Path "thirdparty\SDL3-$SDLVersion" -NewName "SDL3"
 
     - name: Configure CMake
       run: cmake -B build -DCMAKE_BUILD_TYPE=Release
 
     - name: Build Application
       run: cmake --build build --config Release -j 4
+
+    - name: Run Tests
+      run: ctest --test-dir build --build-config Release --output-on-failure
 
     - name: Package Release
       # Using bash shell here to keep the zip/cp syntax consistent with your Linux/macOS workflows
@@ -52,10 +46,11 @@ jobs:
         DIR_NAME="HIDTester-$VERSION-Windows"
         mkdir -p "$DIR_NAME"
         
-        # Copy the executable and the SDL2.dll to the distribution folder
+        # Copy the executable and the SDL3.dll to the distribution folder
         cp build/Release/HIDTester.exe "$DIR_NAME/"
-        cp build/Release/SDL2.dll "$DIR_NAME/" || true
+        cp build/Release/SDL3.dll "$DIR_NAME/" || true
         cp README.md "$DIR_NAME/" || true
+        cp MIGRATION.md "$DIR_NAME/" || true
         cp LICENSE "$DIR_NAME/" || true
         
         # Windows runners use 7z to create zip archives
